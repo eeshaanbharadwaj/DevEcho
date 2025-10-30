@@ -30,17 +30,33 @@ mongoose.connect(process.env.MONGO_URI)
 // --------------------------
 
 // Configure CORS for the frontend running on port 5173
-app.use(cors({
-    origin: "https://www.devecho.space"
-}));
+
 
 //updated for clerk
+// Define allowed origins for CORS (must include full protocol)
+const ALLOWED_ORIGINS = [
+    "https://devecho-frontend.vercel.app",
+    "https://devecho.space",
+    "https://www.devecho.space",
+    "http://localhost:5173",
+    "http://localhost:3000"
+];
+
+// Express CORS for any HTTP routes (if added later)
+app.use(cors({
+    origin: ALLOWED_ORIGINS,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true
+}));
 
 // Setup Socket.io Server
 const io = new Server(httpServer, {
     cors: {
-        origin: "http://localhost:5173",
-        methods: ["GET", "POST"]
+        origin: ALLOWED_ORIGINS,
+        methods: ["GET", "POST"],
+        allowedHeaders: ["Authorization", "Content-Type"],
+        credentials: true
     }
 });
 
