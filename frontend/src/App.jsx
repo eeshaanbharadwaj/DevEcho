@@ -5,6 +5,7 @@ import './App.css';
 import { debounce } from './utils/debounce';
 import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
+import { useAuth, useUser, useClerk, SignedIn, SignedOut, UserButton, SignInButton, ClerkLoaded } from '@clerk/clerk-react';
 import { io } from 'socket.io-client';
 import { useState, useEffect, useCallback, useRef } from 'react';
 
@@ -12,6 +13,15 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 const socket = io('http://localhost:3001'); 
 
 const EditorPage = () => {
+
+    const [targetLanguage, setTargetLanguage] = useState('python'); // Default target
+    const [isTranslating, setIsTranslating] = useState(false);
+
+    const handleTranslateCode = () => {
+        setIsTranslating(true);
+        socket.emit('request-translation', roomId, code, language, targetLanguage);
+    };
+
     const { roomId } = useParams();
     const navigate = useNavigate();
     const [code, setCode] = useState('// Waiting for server to load code...');
@@ -37,7 +47,17 @@ const EditorPage = () => {
     const chatMessagesEndRef = useRef(null);
     const chatContainerRef = useRef(null);
 
-    const username = localStorage.getItem('username') || `User-${Math.floor(Math.random() * 1000)}`;
+    const { user, isSignedIn } = useUser();
+    const clerkPreferredName =
+        user?.username ||
+        user?.fullName ||
+        [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+        (user?.primaryEmailAddress?.emailAddress ? user.primaryEmailAddress.emailAddress.split('@')[0] : undefined) ||
+        user?.id;
+    const username =
+        (isSignedIn ? clerkPreferredName : undefined) ||
+        localStorage.getItem('username') ||
+        `User-${Math.floor(Math.random() * 1000)}`;
 
     // Define the debounced function for the AI call (3 seconds delay)
     const requestSuggestionDebounced = useCallback(
@@ -105,11 +125,19 @@ const EditorPage = () => {
         }
     };
     
-    // 3. Socket.io Event Listeners (runs once on component mount)
+    // 3a. Join the room only when roomId or username changes
     useEffect(() => {
-        // Join the room as soon as the component mounts
+        if (!roomId || !username) return;
         socket.emit('join-room', roomId, username);
+        return () => {
+            if (socket.connected) {
+                socket.emit('leave-room', roomId);
+            }
+        };
+    }, [roomId, username]);
 
+    // 3b. Socket.io Event Listeners (attach per room)
+    useEffect(() => {
         // Receive initial code from server
         socket.on('load-code', (initialCode) => {
             setCode(initialCode);
@@ -163,12 +191,25 @@ const EditorPage = () => {
             setMessages((prevMessages) => [...prevMessages, message]);
         });
 
-        // Cleanup on unmount
-        return () => {
-            // Notify server that user is leaving
-            if (socket.connected) {
-                socket.emit('leave-room', roomId);
+        // --- NEW: TRANSLATION RESULT LISTENER ---
+        socket.on('receive-translation', (translatedCode) => {
+            setIsTranslating(false);
+
+            if (typeof translatedCode === 'string' && translatedCode.startsWith('Error:')) {
+                setCodeOutput(translatedCode);
+                return;
             }
+
+            if (editorRef.current) {
+                editorRef.current.setValue(translatedCode);
+            }
+
+            setLanguage(targetLanguage);
+            setCodeOutput(`Code successfully translated from ${language} to ${targetLanguage}.`);
+        });
+
+        // Cleanup on room change/unmount: remove listeners only
+        return () => {
             // Remove event listeners
             socket.off('load-code');
             socket.off('code-sync');
@@ -178,8 +219,9 @@ const EditorPage = () => {
             socket.off('code-output');
             socket.off('user-list-update');
             socket.off('receive-message');
+            socket.off('receive-translation');
         };
-    }, [roomId, username]);
+    }, [roomId]);
 
     // Auto-scroll chat to bottom when new messages arrive
     useEffect(() => {
@@ -221,6 +263,27 @@ const EditorPage = () => {
                         <option value="cpp">C++</option>
                         <option value="java">Java</option>
                     </select>
+                    <span className="translate-sep" aria-hidden="true">to</span>
+                    {/* Target language for translation */}
+                    <select
+                        className="lang-selector"
+                        value={targetLanguage}
+                        onChange={(e) => setTargetLanguage(e.target.value)}
+                        title="Target language"
+                    >
+                        <option value="python">Python</option>
+                        <option value="javascript">JavaScript</option>
+                        <option value="csharp">C#</option>
+                        <option value="java">Java</option>
+                    </select>
+                    <button
+                        className="btn-summary"
+                        onClick={handleTranslateCode}
+                        disabled={isTranslating || language === targetLanguage}
+                        title="Translate code to target language"
+                    >
+                        {isTranslating ? 'Translating…' : '🌐 Translate'}
+                    </button>
                     <button 
                         className="btn-run"
                         onClick={handleRunCode} 
@@ -232,6 +295,9 @@ const EditorPage = () => {
 
                 {/* Right Section - Action Buttons */}
                 <div className="header-right">
+                    <SignedIn>
+                        <UserButton afterSignOutUrl="/" />
+                    </SignedIn>
                     <button 
                         className="btn-summary"
                         onClick={handleGenerateSummary} 
@@ -382,40 +448,77 @@ const EditorPage = () => {
     );
 };
 
-// --- Home Component (Entry Point to create/join rooms) ---
-const Home = () => {
+// --- LandingPage Component (Entry Point to create/join rooms) ---
+const LandingPage = () => {
     const [inputRoomId, setInputRoomId] = useState('');
     const navigate = useNavigate();
+    const { isSignedIn } = useAuth();
+    const { openSignIn } = useClerk();
 
     const handleJoin = () => {
-        if (inputRoomId.trim()) {
-            navigate(`/room/${inputRoomId.trim()}`);
+        const trimmed = inputRoomId.trim();
+        if (!trimmed) return;
+        if (!isSignedIn) {
+            openSignIn({ afterSignInUrl: `${window.location.origin}/room/${trimmed}` });
+            return;
         }
+        navigate(`/room/${trimmed}`);
     };
     
     const handleCreate = () => {
         const newRoomId = Math.random().toString(36).substring(2, 9);
+        if (!isSignedIn) {
+            openSignIn({ afterSignInUrl: `${window.location.origin}/room/${newRoomId}` });
+            return;
+        }
         navigate(`/room/${newRoomId}`);
     };
 
     return (
-        <div className="home-container">
-            <div className="home-card">
-                <div className="home-header">
-                    <h1 className="home-title">DevEcho</h1>
-                    <p className="home-subtitle">Real-time collaborative code editor with AI assistance</p>
-                </div>
-                
-                <div className="home-actions">
-                    <button className="btn-create" onClick={handleCreate}>
-                        ✨ Create New Session
-                    </button>
-                    
-                    <div className="divider">
-                        <span className="text-muted">or</span>
+        <div className="landing">
+            {/* Navbar */}
+            <header className="nav">
+                <div className="nav__wrap">
+                    <div className="nav__brand">
+                        <span className="logo">DevEcho</span>
                     </div>
-                    
-                    <div className="join-form">
+                    <nav className="nav__actions">
+                        <a href="#features" className="nav__link">Features</a>
+                        <a href="#how" className="nav__link">How it works</a>
+                        <a href="#pricing" className="nav__link">Pricing</a>
+                        <button className="btn-primary nav__cta" onClick={handleCreate}>New Session</button>
+                        <div style={{ marginLeft: 12 }} />
+                        <SignedIn>
+                            <div style={{ display: 'flex', alignItems: 'center' }}>
+                                <UserButton afterSignOutUrl="/" />
+                            </div>
+                        </SignedIn>
+                        <SignedOut>
+                            <SignInButton mode="modal" afterSignInUrl={window.location.origin}>
+                                <button className="btn-secondary">Sign in</button>
+                            </SignInButton>
+                        </SignedOut>
+                    </nav>
+                </div>
+            </header>
+
+            {/* Hero */}
+            <section className="hero">
+                <div className="hero__bg" />
+                {/* Decorative light beams */}
+                <div className="hero__beam hero__beam--a" />
+                <div className="hero__beam hero__beam--b" />
+                <div className="hero__inner">
+                    <div className="hero__copy">
+                        <h1 className="hero__title">Real‑time collaborative coding with AI that accelerates your team</h1>
+                        <p className="hero__subtitle">
+                            Spin up a secure room, code together in Monaco, chat, run snippets,
+                            and get inline AI mentoring and summaries—without the setup.
+                        </p>
+
+                        <div className="hero__actions">
+                            <button className="btn-primary hero__cta" onClick={handleCreate}>✨ Create New Session</button>
+                            <div className="hero__join">
                         <input
                             type="text"
                             value={inputRoomId}
@@ -423,31 +526,160 @@ const Home = () => {
                             placeholder="Enter Room ID"
                             onKeyDown={(e) => e.key === 'Enter' && handleJoin()}
                         />
-                        <button className="btn-join" onClick={handleJoin}>
-                            Join Session
+                                <button className="btn-secondary" onClick={handleJoin}>Join Session</button>
+                            </div>
+                        </div>
+
+                        <div className="trust">
+                            <span className="trust__item">Encrypted rooms</span>
+                            <span className="dot" />
+                            <span className="trust__item">Zero installs</span>
+                            <span className="dot" />
+                            <span className="trust__item">AI summaries</span>
+                        </div>
+
+                        {/* Quick Start strip */}
+                        <div className="quickstart">
+                            <div className="quickstart__item">
+                                <div className="quickstart__icon">1</div>
+                                <div>
+                                    <div className="quickstart__title">Create</div>
+                                    <div className="quickstart__text">Spin up a unique room</div>
+                                </div>
+                            </div>
+                            <div className="quickstart__sep" />
+                            <div className="quickstart__item">
+                                <div className="quickstart__icon">2</div>
+                                <div>
+                                    <div className="quickstart__title">Invite</div>
+                                    <div className="quickstart__text">Share the room ID</div>
+                                </div>
+                            </div>
+                            <div className="quickstart__sep" />
+                            <div className="quickstart__item">
+                                <div className="quickstart__icon">3</div>
+                                <div>
+                                    <div className="quickstart__title">Collaborate</div>
+                                    <div className="quickstart__text">Code with chat & AI</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Product peek */}
+                    <div className="hero__preview">
+                        <div className="preview__window">
+                            <div className="preview__titlebar">
+                                <span className="dot red" />
+                                <span className="dot yellow" />
+                                <span className="dot green" />
+                                <span className="preview__title">room/ab12cde</span>
+                            </div>
+                            <div className="preview__editor">
+                                <pre>{`function greet(name) {
+  return \`Hello, \${name}! 👋\`;
+}
+
+console.log(greet('DevEcho'));
+/* AI Mentor: Consider adding input validation. */`}</pre>
+                            </div>
+                            <div className="preview__output">[JS Output]: Hello, DevEcho! 👋</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* Quick features */}
+            <section id="features" className="section features">
+                <div className="section__head">
+                    <h2>Built for fast collaboration</h2>
+                    <p className="text-muted">Create, invite, and start coding in seconds.</p>
+                </div>
+                <div className="grid features__grid">
+                    <div className="card feature">
+                        <div className="feature__icon">⚡</div>
+                        <h3>Realtime editor</h3>
+                        <p>Low-latency Monaco with instant room sync.</p>
+                    </div>
+                    <div className="card feature">
+                        <div className="feature__icon">🤖</div>
+                        <h3>AI assist</h3>
+                        <p>Inline suggestions and one-click summaries.</p>
+                    </div>
+                    <div className="card feature">
+                        <div className="feature__icon">▶️</div>
+                        <h3>Run & translate</h3>
+                        <p>Execute code and convert between languages.</p>
+                    </div>
+                </div>
+            </section>
+
+            {/* CTA */}
+            <section id="pricing" className="section cta">
+                <div className="cta__card">
+                    <h2>Start collaborating, free</h2>
+                    <p className="text-muted">Unlimited sessions while in beta. No credit card required.</p>
+                    <div className="cta__actions">
+                        <button className="btn-primary" onClick={handleCreate}>Create Session</button>
+                        <button className="btn-secondary" onClick={() => document.querySelector('.hero__join input')?.focus()}>
+                            Join with ID
                         </button>
                     </div>
                 </div>
+            </section>
+
+            {/* Footer */}
+            <footer className="footer">
+                <div className="footer__wrap">
+                    <div className="footer__brand">DevEcho</div>
+                    <div className="footer__links">
+                        <a href="#features">Features</a>
+                        <a href="#how">How it works</a>
+                        <a href="#pricing">Pricing</a>
+                    </div>
+                    <div className="footer__legal">© {new Date().getFullYear()} DevEcho. All rights reserved. · Built by <a href="https://www.linkedin.com/in/eeshaanbharadwaj" target="_blank" rel="noreferrer noopener">Eeshaan Bharadwaj</a> · <a href="https://github.com/eeshaanbharadwaj" target="_blank" rel="noreferrer noopener">GitHub</a></div>
             </div>
+            </footer>
         </div>
     );
 };
 
 // --- Router Setup ---
 function App() {
+    const { user, isSignedIn } = useUser();
+    // ✅ Sync Clerk username to localStorage; fallback to random only if needed
     useEffect(() => {
+        // Wait for Clerk to load fully before syncing
+        if (!user) return;
+        if (isSignedIn) {
+            const preferred =
+                user.username ||
+                user.fullName ||
+                [user.firstName, user.lastName].filter(Boolean).join(' ') ||
+                (user.primaryEmailAddress?.emailAddress ? user.primaryEmailAddress.emailAddress.split('@')[0] : undefined) ||
+                user.id;
+            if (preferred) {
+                localStorage.setItem('username', preferred);
+                return;
+            }
+        }
         if (!localStorage.getItem('username')) {
             localStorage.setItem('username', `User-${Math.floor(Math.random() * 1000)}`);
         }
-    }, []);
+    }, [isSignedIn, user]);
 
     return (
-        <Router>
-            <Routes>
-                <Route path="/" element={<Home />} />
-                <Route path="/room/:roomId" element={<EditorPage />} />
-            </Routes>
-        </Router>
+        <ClerkLoaded>
+            <Router>
+                <Routes>
+                    {/* Public landing page */}
+                    <Route path="/" element={<LandingPage />} />
+
+                    {/* Editor Route */}
+                    <Route path="/room/:roomId" element={<EditorPage />} />
+                </Routes>
+            </Router>
+        </ClerkLoaded>
     );
 }
 

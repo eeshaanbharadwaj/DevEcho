@@ -14,6 +14,7 @@ const { GoogleGenAI } = require('@google/genai');
 // Initialize the AI client using the environment variable
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -33,6 +34,8 @@ app.use(cors({
     origin: "http://localhost:5173"
 }));
 
+//updated for clerk
+
 // Setup Socket.io Server
 const io = new Server(httpServer, {
     cors: {
@@ -41,14 +44,17 @@ const io = new Server(httpServer, {
     }
 });
 
+// Authentication disabled: allow all Socket.io connections
+
 // Socket.io Connection Logic
 io.on('connection', (socket) => {
     console.log(`User connected: ${socket.id}`);
 
     // --- 1. UPDATED JOIN ROOM EVENT ---
-    socket.on('join-room', async (roomId, username) => {
+    socket.on('join-room', async (roomId, usernameFromClient) => {
         socket.join(roomId);
-        socket.data.username = username; // Store username on the socket object
+        const username = usernameFromClient || socket.data.username || 'Anonymous';
+        socket.data.username = username; // persist username on socket
         socket.data.roomId = roomId;     // Store room ID on the socket object
         console.log(`${username} joined room: ${roomId}`);
 
@@ -183,6 +189,46 @@ Code:\n\n\`\`\`javascript\n${currentCode}\n\`\`\`\n\nProvide one concise, action
             console.error("Summary API Error:", error);
             // Send a specific error message for debugging
             io.to(roomId).emit('session-summary-result', `Summary Error: ${error.message || 'Check API Key/Quota.'}`);
+        }
+    });
+
+    // --- NEW: CODE TRANSLATION HANDLER ---
+    socket.on('request-translation', async (roomId, currentCode, sourceLang, targetLang) => {
+        console.log(`Code translation requested: ${sourceLang} -> ${targetLang} for room ${roomId}`);
+        try {
+            if (sourceLang === targetLang) {
+                io.to(roomId).emit('receive-translation', "Error: Source and target languages are the same.");
+                return;
+            }
+
+            const prompt = `You are a world-class programming language translator. Your task is to accurately convert a code snippet from ${sourceLang} to ${targetLang}.
+        
+        The translated code MUST be functionally equivalent to the source code. ONLY output the translated code block, nothing else. DO NOT include any explanations, markdown headers, or surrounding text.
+
+        Source Code (${sourceLang}):\n\n\`\`\`${sourceLang}\n${currentCode}\n\`\`\`\n\nTranslated Code (${targetLang}):`;
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+            });
+
+            let translatedText = response.text;
+            if (!translatedText) {
+                throw new Error('API returned an empty response.');
+            }
+
+            const codeRegex = new RegExp(`\`\`\`${targetLang}\\n([\\s\\S]*?)\\n\`\`\``, 'i');
+            const match = codeRegex.exec(translatedText);
+            if (match && match[1]) {
+                translatedText = match[1].trim();
+            } else {
+                translatedText = translatedText.trim();
+            }
+
+            io.to(roomId).emit('receive-translation', translatedText);
+        } catch (error) {
+            console.error('Translation API Error:', error);
+            io.to(roomId).emit('receive-translation', `Error: Failed to translate code. ${error.message || 'Check API Key/Quota.'}`);
         }
     });
 

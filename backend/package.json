@@ -10,6 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@clerk/clerk-sdk-node": "^4.13.23",
     "@google/genai": "^1.27.0",
     "axios": "^1.13.1",
     "cors": "^2.8.5",
