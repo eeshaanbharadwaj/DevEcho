@@ -31,7 +31,7 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Configure CORS for the frontend running on port 5173
 app.use(cors({
-    origin: "http://localhost:5173"
+    origin: "https://devecho-frontend.vercel.app/"
 }));
 
 //updated for clerk
