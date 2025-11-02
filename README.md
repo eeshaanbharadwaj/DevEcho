@@ -247,7 +247,7 @@ This project is licensed under the ISC License.
 
 ## 📧 Support
 
-For support, email [your-email] or open an issue on GitHub.
+For support, email eeshaan.bharadwaj2@gmail.com or open an issue on GitHub.
 
 ---
 
