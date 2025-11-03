@@ -1,6 +1,6 @@
 # DevEcho
 
-**Real-time collaborative coding platform with AI assistance**
+**Real-time collaborative coding platform with AI assistance**    
 
 DevEcho is a powerful web-based collaborative coding environment that enables teams to code together in real-time with built-in AI mentoring, code execution, language translation, and chat features.
 
